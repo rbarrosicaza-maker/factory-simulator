@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Factory what-if simulator</title>
+<!--
+  FACTORY WHAT-IF SIMULATOR
+  A single-file, offline, interactive version of a weekly production planning
+  model originally built in Excel Solver.
+
+  Structure of this file:
+    1. CSS          the look of the page
+    2. HTML         the controls (sliders) and the result panels
+    3. JavaScript   (a) the model data and the baseline values
+                    (b) a small two-phase simplex solver for linear programmes
+                    (c) code that turns slider values into a linear programme
+                    (d) code that draws the results
+  Everything is inline. There are no external files or libraries.
+
+  Licence: MIT. Copy, change and share freely.
+-->
+<style>
+  /* ---------- 1. CSS ---------- */
+  :root {
+    --navy: #1F3864;          /* main accent, matches the report */
+    --navy-soft: #E8EDF5;     /* light navy tint for panels */
+    --ink: #1c1f26;           /* body text */
+    --muted: #5b6270;         /* secondary text */
+    --line: #d9dde5;          /* borders */
+    --bg: #ffffff;
+    --A: #2E5E95;             /* product colours, same as Figure 3 in the report */
+    --B: #7FA8D9;
+    --C: #C9A227;
+    --D: #4CAF87;
+    --idle: #e3e5ea;
+    --tight: #FFF4D6;         /* highlight for binding constraints */
+    --tight-edge: #C9A227;
+    --danger: #B3261E;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 "Segoe UI", Calibri, "Helvetica Neue", Arial, sans-serif; }
+  header { border-bottom: 3px solid var(--navy); padding: 20px 28px 16px; }
+  header h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; color: var(--navy); letter-spacing: .01em; }
+  header p { margin: 0; color: var(--muted); max-width: 70ch; }
+
+  main { display: grid; grid-template-columns: 360px 1fr; gap: 0; min-height: calc(100vh - 90px); }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+
+  /* Controls column */
+  aside { border-right: 1px solid var(--line); padding: 18px 22px 40px; background: #fafbfd; }
+  @media (max-width: 900px) { aside { border-right: 0; border-bottom: 1px solid var(--line); } }
+  aside h2, section h2 { font-size: 13px; font-weight: 600; color: var(--navy); margin: 22px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+  aside h2:first-child { margin-top: 4px; }
+  .ctl { display: grid; grid-template-columns: 1fr 74px; grid-template-rows: auto auto; column-gap: 10px; align-items: center; margin: 6px 0 10px; }
+  .ctl label { grid-column: 1 / 3; font-size: 13px; color: var(--ink); }
+  .ctl label small { color: var(--muted); }
+  .ctl input[type=range] { width: 100%; accent-color: var(--navy); }
+  .ctl input[type=number] { width: 74px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 4px; font: inherit; font-size: 13px; text-align: right; }
+  .ctl input:focus-visible { outline: 2px solid var(--navy); outline-offset: 1px; }
+  .btns { display: flex; gap: 8px; margin: 4px 0 14px; }
+  button { font: inherit; font-size: 14px; padding: 8px 14px; border-radius: 4px; border: 1px solid var(--navy); cursor: pointer; }
+  button.primary { background: var(--navy); color: #fff; }
+  button.secondary { background: #fff; color: var(--navy); }
+  button:focus-visible { outline: 2px solid var(--C); outline-offset: 2px; }
+
+  /* Results column */
+  .results { padding: 18px 28px 40px; }
+  .headline { display: grid; grid-template-columns: auto 1fr; gap: 28px; align-items: end; margin-bottom: 6px; }
+  .big { font-size: 46px; font-weight: 600; color: var(--navy); line-height: 1; }
+  .big small { display: block; font-size: 13px; font-weight: 400; color: var(--muted); margin-top: 6px; }
+  .delta { font-size: 15px; color: var(--muted); padding-bottom: 8px; }
+  .delta b { color: var(--ink); }
+  .status { margin: 10px 0 0; padding: 10px 12px; border-radius: 4px; background: var(--navy-soft); color: var(--navy); font-size: 14px; }
+  .status.bad { background: #FBEAE9; color: var(--danger); }
+
+  /* Utilisation bars, one per line */
+  .lines { margin-top: 10px; }
+  .lineRow { display: grid; grid-template-columns: 64px 1fr 110px; gap: 12px; align-items: center; margin: 10px 0; }
+  .lineRow .name { font-weight: 600; color: var(--navy); }
+  .bar { display: flex; height: 34px; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; background: var(--idle); }
+  .seg { display: flex; align-items: center; justify-content: center; color: #fff; font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; }
+  .seg.idle { color: var(--muted); }
+  .lineRow .used { font-size: 13px; color: var(--muted); text-align: right; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin: 4px 0 0 76px; }
+  .legend span::before { content: ""; display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; background: var(--sw); }
+
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.tight { background: var(--tight); box-shadow: inset 3px 0 0 var(--tight-edge); }
+  tr.tight td:first-child { font-weight: 600; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  @media (max-width: 1100px) { .two { grid-template-columns: 1fr; } }
+
+  footer { padding: 14px 28px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+  @media (prefers-reduced-motion: no-preference) { .seg { transition: width .25s ease; } }
+</style>
+</head>
+<body>
+
+<!-- ---------- 2. HTML ---------- -->
+<header>
+  <h1>Factory what-if simulator</h1>
+  <p>Weekly production plan for three lines and four products, solved as a linear programme. Move any limit and the plan, the margin and the bottlenecks recalculate immediately.</p>
+</header>
+
+<main>
+  <aside id="controls">
+    <!-- Controls are generated by JavaScript from the CONTROLS list below,
+         so every slider has exactly one definition. -->
+    <div class="btns">
+      <button class="primary" id="solveBtn" type="button">Solve</button>
+      <button class="secondary" id="resetBtn" type="button">Reset to baseline</button>
+    </div>
+  </aside>
+
+  <section class="results">
+    <div class="headline">
+      <div class="big"><span id="objective">£0</span><small>weekly contribution margin</small></div>
+      <div class="delta" id="delta"></div>
+    </div>
+    <div class="status" id="status"></div>
+
+    <h2>Hours by line (each bar is that line's available hours)</h2>
+    <div class="lines" id="lines"></div>
+    <div class="legend">
+      <span style="--sw: var(--A)">Product A</span>
+      <span style="--sw: var(--B)">Product B</span>
+      <span style="--sw: var(--C)">Product C</span>
+      <span style="--sw: var(--D)">Product D</span>
+      <span style="--sw: var(--idle)">Idle</span>
+    </div>
+
+    <div class="two">
+      <div>
+        <h2>Plan: hours per line and product</h2>
+        <table id="planTable"></table>
+        <h2>Units per product</h2>
+        <table id="unitsTable"></table>
+      </div>
+      <div>
+        <h2>Constraints: which walls the plan is touching</h2>
+        <table id="constraintTable"></table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>Illustrative model. Built by Rosario Barros with AI assistance.</footer>
+
+<script>
+/* ============================================================
+   3a. THE MODEL DATA
+   ============================================================ */
+
+// The eight decision variables: hours a line spends on a product per week.
+// Only the allowed line-product pairings exist. A pairing that is not in this
+// list simply cannot be chosen, which is how the capability matrix is enforced.
+const VARS = [
+  { id: "L1-A", line: "L1", product: "A", rate: 10 },
+  { id: "L1-C", line: "L1", product: "C", rate: 4  },
+  { id: "L2-B", line: "L2", product: "B", rate: 8  },
+  { id: "L2-C", line: "L2", product: "C", rate: 6  },
+  { id: "L2-D", line: "L2", product: "D", rate: 5  },
+  { id: "L3-A", line: "L3", product: "A", rate: 7  },
+  { id: "L3-B", line: "L3", product: "B", rate: 6  },
+  { id: "L3-D", line: "L3", product: "D", rate: 4  },
+];
+const LINES = ["L1", "L2", "L3"];
+const PRODUCTS = ["A", "B", "C", "D"];
+
+// Bill of materials: units of each material consumed per unit of each product.
+const BOM = {
+  M1: { A: 2, B: 1, C: 3, D: 0 },
+  M2: { A: 1, B: 2, C: 0, D: 2 },
+  M3: { A: 0, B: 0, C: 0, D: 3 },
+};
+
+// Every adjustable number, with its baseline value and slider range.
+// "key" is used everywhere else in the code to look the value up.
+const CONTROLS = [
+  { group: "Line hours available per week", key: "hours_L1", label: "Line 1 hours", min: 0, max: 168, step: 1, base: 80 },
+  { group: "Line hours available per week", key: "hours_L2", label: "Line 2 hours", min: 0, max: 168, step: 1, base: 80 },
+  { group: "Line hours available per week", key: "hours_L3", label: "Line 3 hours", min: 0, max: 168, step: 1, base: 80 },
+  { group: "Shared labour pool, Lines 2 and 3", key: "pool", label: "Running hours the certified operators can staff", hint: "7 operators × 40 h = 280 operator-hours; 2 per running line = 140", min: 0, max: 336, step: 1, base: 140 },
+  { group: "Demand ceilings (units)", key: "dem_A", label: "Demand for A", min: 0, max: 1500, step: 10, base: 600 },
+  { group: "Demand ceilings (units)", key: "dem_B", label: "Demand for B", min: 0, max: 1500, step: 10, base: 500 },
+  { group: "Demand ceilings (units)", key: "dem_C", label: "Demand for C", min: 0, max: 1500, step: 10, base: 400 },
+  { group: "Demand ceilings (units)", key: "dem_D", label: "Demand for D", min: 0, max: 1500, step: 10, base: 300 },
+  { group: "Committed floor (units)", key: "floor_A", label: "Promised minimum of A", min: 0, max: 1500, step: 10, base: 200 },
+  { group: "Material stock available (units)", key: "stock_M1", label: "Material M1", min: 0, max: 10000, step: 50, base: 5000 },
+  { group: "Material stock available (units)", key: "stock_M2", label: "Material M2", min: 0, max: 10000, step: 50, base: 2400 },
+  { group: "Material stock available (units)", key: "stock_M3", label: "Material M3", min: 0, max: 10000, step: 50, base: 1500 },
+  { group: "Contribution margin (£ per unit)", key: "margin_A", label: "Margin on A", min: 0, max: 30, step: 0.5, base: 8 },
+  { group: "Contribution margin (£ per unit)", key: "margin_B", label: "Margin on B", min: 0, max: 30, step: 0.5, base: 6 },
+  { group: "Contribution margin (£ per unit)", key: "margin_C", label: "Margin on C", min: 0, max: 30, step: 0.5, base: 5 },
+  { group: "Contribution margin (£ per unit)", key: "margin_D", label: "Margin on D", min: 0, max: 30, step: 0.5, base: 12 },
+];
+
+/* ============================================================
+   3b. A SMALL TWO-PHASE SIMPLEX SOLVER
+   ============================================================
+   Solves:   maximise  c · x
+             subject to  A_i · x  (<= or >=)  b_i   for each constraint i
+                         x >= 0
+   Inputs:
+     c      array of objective coefficients, one per variable
+     cons   array of { coef: [...], type: "<=" | ">=", rhs: number }
+   Output:
+     { status: "optimal" | "infeasible" | "unbounded", x: [...], objective: number }
+
+   How it works, in plain words:
+   1. Every inequality is turned into an equation by adding a helper variable:
+        "<=" gets a SLACK variable (the unused part of the limit),
+        ">=" gets a SURPLUS variable (the amount above the floor) and, because
+             a surplus starts the wrong side of zero, an ARTIFICIAL variable
+             that gives us a legal starting point.
+   2. Phase 1 minimises the sum of the artificial variables. If that sum cannot
+      reach zero, no plan satisfies all the constraints: INFEASIBLE.
+   3. Phase 2 then maximises the real objective from that feasible start.
+   The "tableau" is just the constraint matrix with the objective as an extra
+   row; a "pivot" is one step of Gaussian elimination that swaps which variable
+   is "basic" (non-zero). Bland's rule (always pick the lowest-index candidate)
+   guarantees the loop cannot cycle forever.
+   ============================================================ */
+function simplexSolve(c, cons) {
+  const EPS = 1e-9;
+  const n = c.length;                 // number of real decision variables
+  const m = cons.length;              // number of constraints
+
+  // Normalise so every right-hand side is non-negative (multiply a row by -1
+  // and flip its inequality if needed). This keeps the starting basis legal.
+  const rows = cons.map(k => {
+    let coef = k.coef.slice(), type = k.type, rhs = k.rhs;
+    if (rhs < 0) { coef = coef.map(v => -v); rhs = -rhs; type = (type === "<=") ? ">=" : "<="; }
+    return { coef, type, rhs };
+  });
+
+  // Column layout of the tableau:
+  //   [ real vars (n) | slack/surplus (m) | artificial (a) | RHS ]
+  const numArt = rows.filter(r => r.type === ">=").length;
+  const W = n + m + numArt + 1;       // total columns including RHS
+  const T = [];                       // the tableau rows (constraints only)
+  const basis = [];                   // which column is basic in each row
+  let artCol = n + m;                 // next free artificial column
+  rows.forEach((r, i) => {
+    const row = new Array(W).fill(0);
+    for (let j = 0; j < n; j++) row[j] = r.coef[j];
+    if (r.type === "<=") {
+      row[n + i] = 1;                 // slack
+      basis.push(n + i);
+    } else {
+      row[n + i] = -1;                // surplus
+      row[artCol] = 1;                // artificial
+      basis.push(artCol);
+      artCol++;
+    }
+    row[W - 1] = r.rhs;
+    T.push(row);
+  });
+
+  // One pivot: make column `col` a unit vector with a 1 in row `row`.
+  function pivot(row, col, objRow) {
+    const p = T[row][col];
+    for (let j = 0; j < W; j++) T[row][j] /= p;
+    for (let i = 0; i < m; i++) {
+      if (i === row || Math.abs(T[i][col]) < EPS) continue;
+      const f = T[i][col];
+      for (let j = 0; j < W; j++) T[i][j] -= f * T[row][j];
+    }
+    const f = objRow[col];
+    if (Math.abs(f) > EPS) for (let j = 0; j < W; j++) objRow[j] -= f * T[row][j];
+    basis[row] = col;
+  }
+
+  // Run the simplex loop on a given objective row (we MINIMISE objRow · vars,
+  // written in "reduced cost" form: pick a column with a negative reduced cost).
+  // `allowed` says which columns may enter the basis.
+  function iterate(objRow, allowed) {
+    for (let guard = 0; guard < 5000; guard++) {
+      // Entering column: lowest index with negative reduced cost (Bland's rule).
+      let col = -1;
+      for (let j = 0; j < W - 1; j++) if (allowed(j) && objRow[j] < -EPS) { col = j; break; }
+      if (col === -1) return "optimal";
+      // Leaving row: minimum ratio test, ties broken by lowest basis index.
+      let row = -1, best = Infinity;
+      for (let i = 0; i < m; i++) {
+        if (T[i][col] > EPS) {
+          const ratio = T[i][W - 1] / T[i][col];
+          if (ratio < best - EPS || (Math.abs(ratio - best) <= EPS && basis[i] < basis[row])) { best = ratio; row = i; }
+        }
+      }
+      if (row === -1) return "unbounded";
+      pivot(row, col, objRow);
+    }
+    return "unbounded"; // safety valve; should never be reached
+  }
+
+  // ---- Phase 1: drive the artificial variables to zero ----
+  if (numArt > 0) {
+    // Objective: minimise sum of artificials. Start with +1 on each artificial
+    // column, then subtract the rows where they are basic so the row is in
+    // reduced-cost form.
+    const obj1 = new Array(W).fill(0);
+    for (let j = n + m; j < W - 1; j++) obj1[j] = 1;
+    for (let i = 0; i < m; i++) if (basis[i] >= n + m) for (let j = 0; j < W; j++) obj1[j] -= T[i][j];
+    iterate(obj1, () => true);
+    // obj1[W-1] now holds minus the remaining artificial total.
+    if (Math.abs(obj1[W - 1]) > 1e-7) return { status: "infeasible", x: new Array(n).fill(0), objective: NaN };
+    // Push any artificial still sitting in the basis (at zero level) out of it.
+    for (let i = 0; i < m; i++) {
+      if (basis[i] >= n + m) {
+        let col = -1;
+        for (let j = 0; j < n + m; j++) if (Math.abs(T[i][j]) > EPS) { col = j; break; }
+        if (col !== -1) pivot(i, col, obj1);
+      }
+    }
+  }
+
+  // ---- Phase 2: maximise the real objective ----
+  // We minimise (-c · x), so the objective row starts as -c on real columns,
+  // then is put in reduced-cost form against the current basis.
+  const obj2 = new Array(W).fill(0);
+  for (let j = 0; j < n; j++) obj2[j] = -c[j];
+  for (let i = 0; i < m; i++) {
+    const b = basis[i];
+    if (Math.abs(obj2[b]) > EPS) { const f = obj2[b]; for (let j = 0; j < W; j++) obj2[j] -= f * T[i][j]; }
+  }
+  const status = iterate(obj2, j => j < n + m);   // artificials may not re-enter
+  if (status === "unbounded") return { status, x: new Array(n).fill(0), objective: Infinity };
+
+  // Read the solution: basic variables take the RHS of their row, others are 0.
+  const x = new Array(n).fill(0);
+  for (let i = 0; i < m; i++) if (basis[i] < n) x[basis[i]] = T[i][W - 1];
+  const objective = x.reduce((s, v, j) => s + c[j] * v, 0);
+  return { status: "optimal", x, objective };
+}
+
+/* ============================================================
+   3c. FROM SLIDER VALUES TO A LINEAR PROGRAMME
+   ============================================================ */
+
+// Objective coefficient for one variable = units per hour × £ per unit.
+function objectiveCoefficients(v) {
+  return VARS.map(d => d.rate * v["margin_" + d.product]);
+}
+
+// Units of a product per hour of each variable (0 for other products).
+function unitsRow(product) {
+  return VARS.map(d => d.product === product ? d.rate : 0);
+}
+
+// Build the constraint list. Each entry keeps a name and a "used" function so
+// the results panel can compute used-versus-limit straight from the solution.
+function buildConstraints(v) {
+  const cons = [];
+  const add = (name, coef, type, rhs, unit) => cons.push({ name, coef, type, rhs, unit });
+
+  LINES.forEach((L, i) => add(`Line ${i + 1} hours`, VARS.map(d => d.line === L ? 1 : 0), "<=", v["hours_" + L], "h"));
+  add("Labour pool, Lines 2+3", VARS.map(d => (d.line === "L2" || d.line === "L3") ? 1 : 0), "<=", v.pool, "h");
+  PRODUCTS.forEach(p => add(`Demand for ${p}`, unitsRow(p), "<=", v["dem_" + p], "units"));
+  add("Promised floor for A", unitsRow("A"), ">=", v.floor_A, "units");
+  Object.keys(BOM).forEach(mat => {
+    const coef = VARS.map(d => d.rate * BOM[mat][d.product]);
+    add(`Material ${mat}`, coef, "<=", v["stock_" + mat], "units");
+  });
+  return cons;
+}
+
+// Solve for a given set of values and return everything the UI needs.
+function solveModel(v) {
+  const c = objectiveCoefficients(v);
+  const cons = buildConstraints(v);
+  const r = simplexSolve(c, cons);
+  const hours = {}; VARS.forEach((d, j) => hours[d.id] = r.x[j]);
+  const units = {}; PRODUCTS.forEach(p => units[p] = VARS.reduce((s, d, j) => s + (d.product === p ? d.rate * r.x[j] : 0), 0));
+  const lineHours = {}; LINES.forEach(L => lineHours[L] = VARS.reduce((s, d, j) => s + (d.line === L ? r.x[j] : 0), 0));
+  const rows = cons.map(k => {
+    const used = k.coef.reduce((s, a, j) => s + a * r.x[j], 0);
+    const slack = k.type === "<=" ? k.rhs - used : used - k.rhs;   // distance to the wall
+    return { name: k.name, type: k.type, used, limit: k.rhs, slack, unit: k.unit, tight: Math.abs(slack) < 1e-6 };
+  });
+  return { status: r.status, objective: r.objective, hours, units, lineHours, rows };
+}
+
+/* ============================================================
+   3d. USER INTERFACE
+   ============================================================ */
+const values = {};                                     // current slider values
+const baseline = solveModel(Object.fromEntries(CONTROLS.map(k => [k.key, k.base])));
+
+const fmtMoney = n => "£" + n.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtNum = (n, dp = 1) => Number(n.toFixed(dp)).toLocaleString("en-GB");
+
+function buildControls() {
+  const aside = document.getElementById("controls");
+  let lastGroup = null;
+  CONTROLS.forEach(k => {
+    values[k.key] = k.base;
+    if (k.group !== lastGroup) {
+      const h = document.createElement("h2"); h.textContent = k.group; aside.appendChild(h); lastGroup = k.group;
+    }
+    const wrap = document.createElement("div"); wrap.className = "ctl";
+    wrap.innerHTML = `<label for="r_${k.key}">${k.label}${k.hint ? ` <small>(${k.hint})</small>` : ""}</label>
+      <input type="range" id="r_${k.key}" min="${k.min}" max="${k.max}" step="${k.step}" value="${k.base}" aria-label="${k.label}">
+      <input type="number" id="n_${k.key}" min="${k.min}" max="${k.max}" step="${k.step}" value="${k.base}" aria-label="${k.label} value">`;
+    aside.appendChild(wrap);
+    const range = wrap.querySelector("input[type=range]"), num = wrap.querySelector("input[type=number]");
+    // Keep the slider and the number box in step, then re-solve live.
+    range.addEventListener("input", () => { num.value = range.value; values[k.key] = +range.value; render(); });
+    num.addEventListener("input", () => { if (num.value === "") return; range.value = num.value; values[k.key] = +num.value; render(); });
+  });
+  document.getElementById("solveBtn").addEventListener("click", render);
+  document.getElementById("resetBtn").addEventListener("click", () => {
+    CONTROLS.forEach(k => { values[k.key] = k.base;
+      document.getElementById("r_" + k.key).value = k.base; document.getElementById("n_" + k.key).value = k.base; });
+    render();
+  });
+}
+
+function render() {
+  const res = solveModel(values);
+  const objEl = document.getElementById("objective"), deltaEl = document.getElementById("delta"), statusEl = document.getElementById("status");
+
+  if (res.status !== "optimal") {
+    objEl.textContent = "No plan";
+    deltaEl.textContent = "";
+    statusEl.className = "status bad";
+    statusEl.textContent = res.status === "infeasible"
+      ? "No plan can satisfy all these limits at once. The promised floor for A is higher than the hours, labour or materials allow. Lower the floor or raise a limit."
+      : "The objective has no upper limit with these settings. Check that every line has an hours limit.";
+    document.getElementById("lines").innerHTML = "";
+    document.getElementById("planTable").innerHTML = "";
+    document.getElementById("unitsTable").innerHTML = "";
+    document.getElementById("constraintTable").innerHTML = "";
+    return;
+  }
+
+  // Headline number and change against the baseline plan.
+  objEl.textContent = fmtMoney(res.objective);
+  const diff = res.objective - baseline.objective;
+  deltaEl.innerHTML = Math.abs(diff) < 0.005
+    ? `This is the <b>baseline plan</b> (${fmtMoney(baseline.objective)}).`
+    : `<b>${diff > 0 ? "+" : "−"}${fmtMoney(Math.abs(diff))}</b> against the baseline plan of ${fmtMoney(baseline.objective)}.`;
+  const tight = res.rows.filter(r => r.tight).map(r => r.name);
+  statusEl.className = "status";
+  statusEl.textContent = tight.length
+    ? `Binding this week: ${tight.join(", ")}. Relaxing any other limit changes nothing.`
+    : "No constraint is binding; the plan is limited only by the objective itself.";
+
+  // Utilisation bars, one per line. Segment width = hours / line limit.
+  const linesEl = document.getElementById("lines"); linesEl.innerHTML = "";
+  LINES.forEach((L, i) => {
+    const limit = values["hours_" + L];
+    const row = document.createElement("div"); row.className = "lineRow";
+    const bar = document.createElement("div"); bar.className = "bar";
+    VARS.filter(d => d.line === L).forEach(d => {
+      const h = res.hours[d.id]; if (h < 1e-6) return;
+      const seg = document.createElement("div"); seg.className = "seg";
+      seg.style.width = (limit > 0 ? 100 * h / limit : 0) + "%"; seg.style.background = `var(--${d.product})`;
+      seg.textContent = `${d.product} ${fmtNum(h)} h`; seg.title = `${d.id}: ${fmtNum(h, 2)} hours`;
+      bar.appendChild(seg);
+    });
+    const idle = limit - res.lineHours[L];
+    if (idle > 1e-6) { const seg = document.createElement("div"); seg.className = "seg idle";
+      seg.style.width = (limit > 0 ? 100 * idle / limit : 100) + "%"; seg.textContent = `idle ${fmtNum(idle)} h`; bar.appendChild(seg); }
+    row.innerHTML = `<div class="name">Line ${i + 1}</div>`;
+    row.appendChild(bar);
+    row.insertAdjacentHTML("beforeend", `<div class="used">${fmtNum(res.lineHours[L])} of ${fmtNum(limit)} h</div>`);
+    linesEl.appendChild(row);
+  });
+
+  // Plan table: hours per variable, with the baseline for comparison.
+  document.getElementById("planTable").innerHTML =
+    `<tr><th>Line and product</th><th class="num">Hours</th><th class="num">Baseline</th><th class="num">Units made</th></tr>` +
+    VARS.map(d => `<tr><td>Line ${d.line[1]}, product ${d.product} <span style="color:var(--muted)">(${d.rate}/h)</span></td>
+      <td class="num">${fmtNum(res.hours[d.id], 2)}</td><td class="num">${fmtNum(baseline.hours[d.id], 2)}</td>
+      <td class="num">${fmtNum(res.hours[d.id] * d.rate)}</td></tr>`).join("");
+
+  // Units table: total per product against its demand ceiling.
+  document.getElementById("unitsTable").innerHTML =
+    `<tr><th>Product</th><th class="num">Units</th><th class="num">Demand</th><th class="num">Unmet</th><th class="num">Margin £</th></tr>` +
+    PRODUCTS.map(p => `<tr><td>Product ${p}</td><td class="num">${fmtNum(res.units[p])}</td><td class="num">${fmtNum(values["dem_" + p])}</td>
+      <td class="num">${fmtNum(Math.max(0, values["dem_" + p] - res.units[p]))}</td>
+      <td class="num">${fmtMoney(res.units[p] * values["margin_" + p])}</td></tr>`).join("");
+
+  // Constraint table: the bottleneck story. Tight rows are highlighted.
+  document.getElementById("constraintTable").innerHTML =
+    `<tr><th>Constraint</th><th class="num">Used</th><th class="num">Limit</th><th class="num">Slack</th></tr>` +
+    res.rows.map(r => `<tr class="${r.tight ? "tight" : ""}"><td>${r.name}${r.type === ">=" ? " (minimum)" : ""}</td>
+      <td class="num">${fmtNum(r.used)} ${r.unit}</td><td class="num">${fmtNum(r.limit)} ${r.unit}</td>
+      <td class="num">${r.tight ? "binding" : fmtNum(r.slack) + " " + r.unit}</td></tr>`).join("");
+}
+
+buildControls();
+render();
+</script>
+</body>
+</html>
